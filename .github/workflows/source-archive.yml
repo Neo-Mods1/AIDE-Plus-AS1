@@ -78,8 +78,8 @@ jobs:
           7z a -t7z -m0=lzma2 -mx=9 -mfb=64 -md=32m -ms=on "$ARCHIVE" ./upstream-src \
             -xr!.git -xr!.gradle -xr!build -xr!.cxx -xr!.idea \
             -xr!local.properties \
-            -x!*.jar -x!*.aar -x!*.so -x!*.zip \
-            -x!*.apk -x!*.aab -x!*.ap_ -x!*.dex -x!*.odex
+            -xr!*.jar -xr!*.aar -xr!*.so -xr!*.zip \
+            -xr!*.apk -xr!*.aab -xr!*.ap_ -xr!*.dex -xr!*.odex
           ls -lh "$ARCHIVE"
           echo "### Archive (binaries excluded)" >> $GITHUB_STEP_SUMMARY
           ls -lh "$ARCHIVE" | tee -a $GITHUB_STEP_SUMMARY
