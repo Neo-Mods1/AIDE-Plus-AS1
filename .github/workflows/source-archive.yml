@@ -12,7 +12,7 @@ on:
         required: false
         default: 'master'
       max_size_mb:
-        description: 'Max allowed archive size in MB (use 30 or 40)'
+        description: 'Max allowed size per volume in MB (use 30 or 40)'
         required: false
         default: '30'
   push:
@@ -52,52 +52,61 @@ jobs:
             done
             true
           }
-          echo "Submodule status (non-fatal):"
           git submodule status --recursive || true
-          du -sh . || true
+
+      - name: Report what is heavy
+        run: |
+          cd upstream-src
+          echo "### Top-level sizes" >> $GITHUB_STEP_SUMMARY
+          du -sh * .git 2>/dev/null | sort -rh | head -n 30 | tee -a $GITHUB_STEP_SUMMARY
+          echo "### Largest files" >> $GITHUB_STEP_SUMMARY
+          find . -path ./.git -prune -o -type f -printf '%s %p\n' 2>/dev/null | sort -rn | head -n 20 | awk '{printf "%.2f MB %s\n", $1/1024/1024, substr($0, index($0,$2))}' | tee -a $GITHUB_STEP_SUMMARY
 
       - name: Install 7z
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq p7zip-full
-          7z i | head -n 5
 
-      - name: Compress with 7z (ultra, exclude .git/build)
-        id: compress
+      # Full source is ~332 MiB (243 MiB even with lzma2 ultra) so a single
+      # <30/40 MB file is impossible. Split into volumes, each under the limit.
+      - name: Compress with 7z split volumes (each < max_size_mb)
         run: |
-          ARCHIVE="${{ runner.temp }}/upstream-source.7z"
-          echo "ARCHIVE=$ARCHIVE" >> $GITHUB_ENV
-          rm -f "$ARCHIVE"
-          7z a -t7z -m0=lzma2 -mx=9 -mfb=64 -md=32m -ms=on "$ARCHIVE" ./upstream-src \
+          MAX_MB="${{ inputs.max_size_mb || '30' }}"
+          OUTDIR="${{ runner.temp }}/parts"
+          mkdir -p "$OUTDIR"
+          rm -f "$OUTDIR"/upstream-source.7z.*
+          echo "OUTDIR=$OUTDIR" >> $GITHUB_ENV
+          7z a -t7z -m0=lzma2 -mx=9 -mfb=64 -md=32m -ms=on -v${MAX_MB}m "$OUTDIR/upstream-source.7z" ./upstream-src \
             -xr!.git -xr!.gradle -xr!build -xr!.cxx -xr!.idea \
             -xr!local.properties -x!*.apk -x!*.aab -x!*.ap_
-          ls -lh "$ARCHIVE"
+          ls -lh "$OUTDIR"
+          echo "### Volumes (limit ${MAX_MB} MB each)" >> $GITHUB_STEP_SUMMARY
+          ls -lh "$OUTDIR" | tee -a $GITHUB_STEP_SUMMARY
 
-      - name: Size gate (must be < max_size_mb)
+      - name: Size gate (every volume must be < max_size_mb)
         id: gate
         run: |
           MAX_MB="${{ inputs.max_size_mb || '30' }}"
-          SIZE_BYTES=$(stat -c%s "$ARCHIVE")
-          SIZE_MB=$(awk "BEGIN {printf \"%.2f\", $SIZE_BYTES/1024/1024}")
           MAX_BYTES=$((MAX_MB * 1024 * 1024))
-          echo "size_bytes=$SIZE_BYTES" >> $GITHUB_OUTPUT
-          echo "size_mb=$SIZE_MB" >> $GITHUB_OUTPUT
-          echo "valid=false" >> $GITHUB_OUTPUT
-          echo "### Archive size: ${SIZE_MB} MB (${SIZE_BYTES} bytes) / limit ${MAX_MB} MB" >> $GITHUB_STEP_SUMMARY
-          if [ "$SIZE_BYTES" -le "$MAX_BYTES" ]; then
-            echo "valid=true" >> $GITHUB_OUTPUT
-            echo "PASS: size in valid range" >> $GITHUB_STEP_SUMMARY
-          else
-            echo "valid=false" >> $GITHUB_OUTPUT
-            echo "FAIL: ${SIZE_MB} MB exceeds ${MAX_MB} MB limit" >> $GITHUB_STEP_SUMMARY
-            exit 1
-          fi
+          FAIL=0
+          for f in "$OUTDIR"/upstream-source.7z.*; do
+            SZ=$(stat -c%s "$f")
+            MB=$(awk "BEGIN {printf \"%.2f\", $SZ/1024/1024}")
+            echo "$(basename $f): $MB MB ($SZ bytes)"
+            if [ "$SZ" -gt "$MAX_BYTES" ]; then
+              echo "::error::$(basename $f) $MB MB exceeds ${MAX_MB} MB"
+              FAIL=1
+            fi
+          done
+          if [ "$FAIL" -eq 1 ]; then exit 1; fi
+          echo "valid=true" >> $GITHUB_OUTPUT
+          echo "PASS: all volumes in valid range" >> $GITHUB_STEP_SUMMARY
 
-      - name: Upload artifact (only if valid)
+      - name: Upload split archive (only if valid)
         if: steps.gate.outputs.valid == 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: upstream-source.7z
-          path: ${{ runner.temp }}/upstream-source.7z
+          name: upstream-source-split.7z
+          path: ${{ runner.temp }}/parts/upstream-source.7z.*
           retention-days: 7
           compression-level: 0
