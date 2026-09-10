@@ -26,20 +26,21 @@ permissions:
 jobs:
   archive:
     runs-on: ubuntu-latest
-    outputs:
-      valid: ${{ steps.gate.outputs.valid }}
-      size_mb: ${{ steps.gate.outputs.size_mb }}
-      size_bytes: ${{ steps.gate.outputs.size_bytes }}
-      archive_name: ${{ steps.gate.outputs.archive_name }}
     steps:
-      - name: Checkout upstream source (shallow, no history)
+      - name: Checkout upstream source
         uses: actions/checkout@v4
         with:
           repository: ${{ inputs.upstream_repo || 'Familyye/AIDE-Plus-AS1' }}
           ref: ${{ inputs.ref || 'master' }}
           path: upstream-src
           fetch-depth: 1
-          submodules: recursive
+          submodules: false
+
+      - name: Init submodules (full fetch, pinned revs may not be shallow-fetchable)
+        run: |
+          cd upstream-src
+          git submodule sync --recursive
+          git submodule update --init --recursive
 
       - name: Install 7z
         run: |
@@ -67,7 +68,7 @@ jobs:
           MAX_BYTES=$((MAX_MB * 1024 * 1024))
           echo "size_bytes=$SIZE_BYTES" >> $GITHUB_OUTPUT
           echo "size_mb=$SIZE_MB" >> $GITHUB_OUTPUT
-          echo "archive_name=upstream-source.7z" >> $GITHUB_OUTPUT
+          echo "valid=false" >> $GITHUB_OUTPUT
           echo "### Archive size: ${SIZE_MB} MB (${SIZE_BYTES} bytes) / limit ${MAX_MB} MB" >> $GITHUB_STEP_SUMMARY
           if [ "$SIZE_BYTES" -le "$MAX_BYTES" ]; then
             echo "valid=true" >> $GITHUB_OUTPUT
@@ -86,51 +87,3 @@ jobs:
           path: ${{ runner.temp }}/upstream-source.7z
           retention-days: 7
           compression-level: 0
-
-  download:
-    needs: archive
-    # Only download if archive passed the size gate
-    if: needs.archive.outputs.valid == 'true'
-    runs-on: ubuntu-latest
-    permissions:
-      actions: read
-    steps:
-      - name: Pre-check remote artifact size
-        id: precheck
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          MAX_MB="${{ inputs.max_size_mb || '30' }}"
-          MAX_BYTES=$((MAX_MB * 1024 * 1024))
-          ART_SIZE=$(gh api "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/artifacts" --jq '.artifacts[] | select(.name=="upstream-source.7z") | .size_in_bytes')
-          echo "Remote artifact size: $ART_SIZE bytes (limit $MAX_BYTES)"
-          if [ -z "$ART_SIZE" ]; then
-            echo "should_download=false" >> $GITHUB_OUTPUT
-            echo "Artifact not found, skipping download"
-            exit 1
-          fi
-          if [ "$ART_SIZE" -le "$MAX_BYTES" ]; then
-            echo "should_download=true" >> $GITHUB_OUTPUT
-          else
-            echo "should_download=false" >> $GITHUB_OUTPUT
-            echo "Artifact $ART_SIZE bytes exceeds ${MAX_MB} MB, refusing download"
-            exit 1
-          fi
-
-      - name: Download artifact (size-gated)
-        if: steps.precheck.outputs.should_download == 'true'
-        uses: actions/download-artifact@v4
-        with:
-          name: upstream-source.7z
-          path: ./downloaded
-
-      - name: Verify downloaded size
-        run: |
-          MAX_MB="${{ inputs.max_size_mb || '30' }}"
-          MAX_BYTES=$((MAX_MB * 1024 * 1024))
-          f=$(find ./downloaded -type f | head -n 1)
-          echo "Downloaded: $f"
-          ls -lh "$f"
-          SZ=$(stat -c%s "$f")
-          echo "Size: $SZ bytes"
-          [ "$SZ" -le "$MAX_BYTES" ] || { echo "Downloaded file exceeds limit"; exit 1; }
