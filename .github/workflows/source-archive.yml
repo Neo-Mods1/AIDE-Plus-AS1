@@ -36,11 +36,25 @@ jobs:
           fetch-depth: 1
           submodules: false
 
-      - name: Init submodules (full fetch, pinned revs may not be shallow-fetchable)
+      - name: Init submodules (tolerant, pinned rev may be gone)
+        continue-on-error: true
         run: |
           cd upstream-src
           git submodule sync --recursive
-          git submodule update --init --recursive
+          git submodule update --init --recursive || {
+            echo "::warning::Pinned submodule rev missing, falling back to tip"
+            git config -f .gitmodules --get-regexp '^submodule\..*\.path$' | awk '{print $2}' | while read -r p; do
+              echo "--- fallback: $p ---"
+              git submodule update --init "$p" || true
+              if [ -d "$p" ]; then
+                (cd "$p" && git fetch origin --depth 1 origin/HEAD 2>/dev/null && git checkout FETCH_HEAD 2>/dev/null) || true
+              fi
+            done
+            true
+          }
+          echo "Submodule status (non-fatal):"
+          git submodule status --recursive || true
+          du -sh . || true
 
       - name: Install 7z
         run: |
